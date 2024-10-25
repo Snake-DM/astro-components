@@ -12,6 +12,7 @@ model_mapping = {
             "Серый": "gray-metallic",
             "Красный": "red-metallic",
             "Серебристый": "silver-metallic",
+            "Белый": "white-metallic",  # TODO my change
         }},
     "Atlas, I": {
         "folder": "Atlas Pro",

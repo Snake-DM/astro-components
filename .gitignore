@@ -23,3 +23,5 @@ pnpm-debug.log*
 src/data/*.json
 src/data/*.yml
 src/data/*.yaml
+
+.idea
