@@ -1,3 +1,4 @@
+import csv
 import logging
 import os
 import pathlib
@@ -5,19 +6,19 @@ import re
 import shutil
 import sys
 import urllib.request
+import xml.etree.ElementTree as ET
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Set, Tuple
+from typing import Any
 from xml.dom import minidom
-from xml.etree.ElementTree import Element, ElementTree
+from xml.etree.ElementTree import Element
 
 import requests
-import xml.etree.ElementTree as ET
-from PIL import Image, ImageOps
-from io import BytesIO
-import csv
-
+import yaml
+from PIL import Image
 from requests import HTTPError, RequestException
-from config import dealer,model_mapping
+
+from config import dealer, model_mapping
 
 
 # Initialize logging
@@ -27,13 +28,22 @@ logging.basicConfig(stream=sys.stdout,
                     # filename='output.txt')
                     )
 
-
 # Global variables
-ELEMENTS = ['mark_id', 'folder_id', 'modification_id', 'complectation_name', 'color',
-          'year']
+ELEMENTS = [
+    'mark_id',
+    'folder_id',
+    'modification_id',
+    'complectation_name',
+    'color',
+    'year'
+]
 # Предполагаем, что у вас есть элементы с именами
-ELEMENTS_TO_LOCALIZE = ['mark_id', 'folder_id', 'modification_id', 'complectation_name',
-                  'color']
+ELEMENTS_TO_LOCALIZE = [
+    'mark_id',
+    'folder_id',
+    'modification_id',
+    'complectation_name',
+    'color']
 
 # Перевод некоторых свойств, для читабельности
 TRANSLATIONS = {
@@ -94,10 +104,9 @@ existing_files = set()
 # cars missed in mapping config
 missing_cars = set()
 
-
 # Глобальный список для хранения путей к текущим превьюшкам
-image_files_set = set() # relative path
-current_thumbs_set= set()  # absolute pat
+image_filepath_set = set()  # relative path
+thumb_filepath_set = set()  # absolute path
 
 # setting environment folders
 # project folder
@@ -116,7 +125,7 @@ except Exception as e:
 
 # Папка для автомобилей - создание чистой папки
 cars_output_dir = pathlib.Path(current_dir, "src", "content", "cars")  #
-    # "src/content/cars"
+# "src/content/cars"
 try:
     if cars_output_dir.exists():
         shutil.rmtree(cars_output_dir)
@@ -131,7 +140,7 @@ class Car:
 
     @property
     def get_vin(self):
-        if self.car.find('vin'):
+        if self.car.find('vin') is not None:
             return self.car.find('vin').text
         return
 
@@ -179,6 +188,12 @@ class Car:
         return
 
     @property
+    def get_run(self):
+        if self.car.find('run') is not None:
+            return self.car.find('run').text
+        return
+
+    @property
     def get_price(self):
         if self.car.find('price') is not None:
             return self.car.find('price').text
@@ -214,6 +229,14 @@ class Car:
             return self.car.find('image').text
         return
 
+    @property
+    def get_images(self) -> list[str] | None:
+        all_images = self.car.find('images')
+        if all_images is not None:
+            return [image.text.strip() for image in all_images.findall('image')]
+        return
+
+
     def get_any_property(self, name: str):
         if self.car.find(name) is not None:
             return self.car.find(name).text
@@ -224,14 +247,16 @@ class Car:
         Builds a unique ID string by extracting specified elements from the XML car data.
         """
         return " ".join(self.car.find(element).text.strip()
-                                              for element in elements # TODO ELEMENTS?
-                                              if self.car.find(element) is not None
-                                              and
-                                              self.car.find(element).text is not None)
-    # # TODO Option 1 (separate)
+                        for element in elements  # TODO ELEMENTS?
+                        if self.car.find(element) is not None
+                        and
+                        self.car.find(element).text is not None)
+
+    # # TODO Option 1 (separate unique_id, filepath) - Remove?
     # def get_unique_id_file_prefix(self, *elements, delimiter: str = "-"):
     #     """
-    #     Builds a unique ID string by extracting specified elements from the XML car data.
+    #     Builds a unique ID string by extracting specified elements from the XML car
+    #     data.
     #     """
     #     unique_id_draft = f"{delimiter}".join(self.car.find(element).text.strip()
     #                                           for element in elements # TODO ELEMENTS?
@@ -243,7 +268,6 @@ class Car:
     #                  replace("+", "-plus").
     #                  lower())
     #
-    # # TODO Option 1 (separate)
     # def get_filepath(self, _unique_id_prefix: str) -> Path:
     #     """
     #     Get a file path for the MDX file with the given unique ID
@@ -251,7 +275,7 @@ class Car:
     #
     #     return pathlib.Path("src", "content", "cars", f"{_unique_id_prefix}.mdx")
 
-    # TODO Option 2 (joined)
+    # TODO Option 2 (joined unique_id + filepath)
     def get_unique_id_filepath(self, *elements, delimiter: str = "-") -> Path:
         """
         Get a file path for the MDX file with the generated unique ID
@@ -263,14 +287,13 @@ class Car:
                                               and
                                               self.car.find(element).text is not None)
 
-
         unique_id_prefix = (
             re.sub(r'[/\\?%*:|"<>.,;\'\[\]()& ]', '', unique_id_draft).
             replace("+", "-plus").
             lower()
         )
 
-        logger.info("!!! Unique_id Normilized: %s", unique_id_prefix)
+        logger.info("!!! Unique_id Normalized: %s", unique_id_prefix)
 
         return pathlib.Path(cars_output_dir, f"{unique_id_prefix}.mdx")
 
@@ -316,7 +339,6 @@ def process_file_to_xml(data) -> Element:
             logger.error("Syntax error in XML: %s", e)
 
 
-
 def create_file(_car: Car, filename) -> None:
     # Логика создания файла
     # TODO make it for path or filename? One or Multiply files?
@@ -337,12 +359,13 @@ def create_file(_car: Car, filename) -> None:
         except KeyError as e:
             logger.error(f"VIN: {vin}. Color not found")
             # Если 'color' не найден, используем путь к изображению ошибки 404
-            thumb = pathlib.Path("img", "404.jpg")  # TODO not used?
+            thumb = pathlib.Path("img", "404.jpg")
             # TODO Model more appropriate error
             # raise ValueError(f"VIN: {vin}. Model color {model_data_color} not found")
             raise HTTPError(404, f"VIN: {vin}. Color not found")
 
-        # Проверяем, существует ли 'model' в 'model_mapping' и есть ли соответствующий 'color'
+        # Проверяем, существует ли 'model' в 'model_mapping' и есть ли соответствующий
+        # 'color'
 
         try:
             folder = model_data_all['folder']
@@ -361,14 +384,11 @@ def create_file(_car: Car, filename) -> None:
         logger.error(f"VIN: {vin}. Model {model} not found")
         # Если 'model' не найден, используем путь к изображению ошибки 404
         missing_cars.add((vin, model))
-        thumb = pathlib.Path("img", "404.jpg")  #TODO not used?
+        thumb = pathlib.Path("img", "404.jpg")
         # TODO Color more appropriate error
         # raise ValueError(f"Model {model} not found")
         # TODO raise and stop execution or continue running a script?
         # raise HTTPError(404, f"VIN: {vin}. Model {model} not found")
-
-
-
 
     # Forming the YAML frontmatter
     content = "---\n"
@@ -377,7 +397,7 @@ def create_file(_car: Car, filename) -> None:
     if total_element is None:
         content += f"total: {1}\n"
     else:
-        content += f"total: {int(total_element)}\n"
+        content += f"total: {int(total_element or 0)}\n"
     # content += f"permalink: {unique_id}\n"
     content += f"vin_hidden: {vin}\n"
 
@@ -412,14 +432,9 @@ def create_file(_car: Car, filename) -> None:
             continue
         if child.tag == 'images':
             images = [img.text.strip() for img in child.findall('image')]
-            create_thumbs(images, _car.get_unique_id(*ELEMENTS))
+            thumb_filepaths = create_thumbs(images, _car.get_unique_id(*ELEMENTS))
             content += f"images: {images}\n"
-            content += f"thumbs: {current_thumbs_set}\n" # TODO clear for each car?
-            # images_files, thumbs_files = (
-            #     create_thumbs(images, _car.get_unique_id(*ELEMENTS))
-            # )
-            # content += f"images: {images}\n"
-            # content += f"thumbs: {thumbs_files}\n"
+            content += f"thumbs: {thumb_filepaths}\n"  # TODO clear for each car?
         elif child.tag == 'color':
             content += f"{child.tag}: {color}\n"
             content += f"image: {thumb}\n"
@@ -434,19 +449,19 @@ def create_file(_car: Car, filename) -> None:
             content += f"description: |\n"
             content += (f"  Купить автомобиль"
                         f" {_car.get_unique_id('mark_id', 'folder_id')}"
-                        f"{f' {_car.get_year} года выпуска' if _car.get_year else ''})"
+                        f"{f' {_car.get_year} года выпуска' if _car.get_year else ''}"
                         f"{f', комплектация {_car.get_complectation_name}' if _car.get_complectation_name is not None else ''}"
                         f"{f', цвет - {_car.get_color}' if _car.get_color is not None else ''}"
                         f"{f', двигатель - {_car.get_modification_id}' if _car.get_modification_id is not None else ''}"
                         f" у официального дилера в г. {dealer.get('city')}."
                         f" Стоимость данного автомобиля "
                         f"{_car.get_unique_id('mark_id', 'folder_id')} – "
-                        f"{_car.get_price_with_discount}\n")
+                        f"{f'{_car.get_price_with_discount}' if {_car.get_price_with_discount} is not None else 'цена'}\n")
             # flat_description = description.replace('\n', '<br>\n')  # TODO not used?
             # for line in flat_description.split("\n"):
             # content += f"  {line}\n"
         else:
-            # TODO if not required as set stores unique values
+            # TODO "if" not required as set stores unique values
             # if child.tag not in encountered_tags:  # Проверяем, встречался ли уже такой
             encountered_tags.add(child.tag)  # Добавляем встреченный тег в множество
             if child.text:  # Only add if there's content
@@ -470,9 +485,64 @@ def create_file(_car: Car, filename) -> None:
     return
 
 
-def update_yaml(self, car, filename, unique_id):
-    # Логика обновления YAML
-    pass
+def update_yaml(_car: Car, filename):
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            content = f.read()
+        logger.info(f"Yaml update: reading {filename} complete.")
+    except Exception as e:
+        logger.error(f"Failed to read {filename}: {e}")
+
+    # Split the content by the YAML delimiter
+    yaml_delimiter = "---\n"
+    parts = content.split(yaml_delimiter)
+
+    # If there's no valid YAML block, raise an exception
+    if len(parts) < 3:
+        raise ValueError("No valid YAML block found in file {filename}.")
+
+    # Parse the YAML block
+    yaml_block = parts[1].strip()
+    data = yaml.safe_load(yaml_block)
+
+    data['total'] = int(_car.get_total or 0) + int(data.setdefault('total', 0))
+    data['run'] = min(int(_car.get_run or 0), int(data.setdefault('run', 0)))
+    data['priceWithDiscount'] = (
+        min(int(_car.get_price_with_discount or 0),
+            data.setdefault('priceWithDiscount', 0))
+    )
+
+    images: list[str | None] | None = _car.get_images
+    if images is not None:
+        if len(images) > 0:
+            data.setdefault('images', []).extend(images)
+            if 'thumbs' not in data or (len(data['thumbs']) < 5):
+                thumbs_files = create_thumbs(images, _car.get_unique_id(*ELEMENTS))
+                # TODO Обнуляем то, что было в data и пишем новые пути thumbs?
+                data.setdefault('thumbs', []).extend(thumbs_files)
+
+    # Convert data back to a YAML string
+    updated_yaml_block = yaml.safe_dump(data,
+                                        default_flow_style=False,
+                                        allow_unicode=True)
+
+    # Reassemble content with updated YAML block
+    updated_content = yaml_delimiter.join(
+            [
+                parts[0],
+                updated_yaml_block,
+                yaml_delimiter.join(parts[2:])
+            ]
+    )
+
+    # Save the updated content to the output file
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(updated_content)
+        logger.info(f"Yaml update {filename} complete.")
+    except Exception as e:
+        logger.error(f"Failed to write {filename}: {e}")
+    return filename
 
 
 def process_csv(csv_file: Any):
@@ -510,7 +580,6 @@ def process_csv(csv_file: Any):
         except RequestException as e:
             logger.error("An error occurred while reading URL data: %s", e)
 
-
     reader = csv.DictReader(data)
 
     root = ET.Element('data')
@@ -539,20 +608,17 @@ def process_csv(csv_file: Any):
         ET.SubElement(car, 'credit_discount').text = row.get('Скидка по кредиту', '0')
         ET.SubElement(car, 'insurance_discount').text = row.get('Скидка по страховке',
                                                                 '0')
-        ET.SubElement(car, 'tradein_discount').text = row.get('Скидка по trade-in',
-                                                              '0')
+        ET.SubElement(car, 'tradein_discount').text = row.get('Скидка по trade-in', '0')
         ET.SubElement(car,
-                      'optional_discount').text = row.get('Дополнительная скидка',
-                                                          '0')
+                      'optional_discount').text = row.get('Дополнительная скидка', '0')
         ET.SubElement(car, 'max_discount').text = row.get('Максимальная скидка', '')
         ET.SubElement(car, 'currency').text = row.get('Валюта', 'RUR')
-        # ET.SubElement(car, 'registry_year').text =          row.get('Год
-        # регистрации', '2023')
         ET.SubElement(car, 'vin').text = row.get('VIN', '')
         ET.SubElement(car, 'description').text = row.get('Описание', '')
         ET.SubElement(car, 'total').text = row.get('Количество', '1')
+        # ET.SubElement(car, 'registry_year').text = row.get('Год регистрации', '2023')
         # images = ET.SubElement(car, 'images')
-        # ET.SubElement(images, 'image').text =             row.get('Ссылка на изображение', '')
+        # ET.SubElement(images, 'image').text = row.get('Ссылка на изображение', '')
 
     xml_tree = ET.ElementTree(root)
 
@@ -578,6 +644,7 @@ def process_csv(csv_file: Any):
 
     return
 
+
 def build_unique_id(self, car, *elements):
     return " ".join(car.find(element).text.strip() for element in elements if
                     car.find(element) is not None and car.find(element).text is not None)
@@ -585,8 +652,8 @@ def build_unique_id(self, car, *elements):
 
 # def build_unique_id(self, car, *elements):
 #     return " ".join(car.find(element).text.strip() for element in elements if
-#                     car.find(element) is not None and car.find(element).text is not None)
-
+#                     car.find(element) is not None and car.find(element).text is not
+#                     None)
 
 
 # Helper function to process permalink
@@ -602,7 +669,7 @@ def process_description(desc_text):
     return '\n'.join(processed_lines)
 
 
-def create_thumbs(image_urls: list[str], _unique_id: str) -> None:
+def create_thumbs(image_urls: list[str], _unique_id: str) -> list[str]:
     """
     Функция для создания превью изображений
     """
@@ -610,7 +677,7 @@ def create_thumbs(image_urls: list[str], _unique_id: str) -> None:
     # Определение относительного пути для возврата
     # self.output_dir
     relative_output_dir = pathlib.Path("img", "thumbs")
-
+    image_filepath_for_a_car = list()
     # # Список для хранения путей к новым или существующим файлам
     # # use set to store unique file paths
     # image_files_set = set()
@@ -626,14 +693,17 @@ def create_thumbs(image_urls: list[str], _unique_id: str) -> None:
         if not output_path.exists():
             # Загрузка и обработка изображения, если файла нет
             image_download = ''
+            response = ''
             try:
-                image_download = urllib.request.urlretrieve(img_url, output_path)
-                logger.info("!!! Image downloaded successfully: %s, %s",
-                            image_download[0], image_download[1])
+                response = requests.get(img_url)
+                logger.info("!!! Image downloaded successfully: %s",
+                            response)
+
             except (RequestException, urllib.error.HTTPError) as e:
                 logger.error(f"Error downloading image {img_url}: {e}")
             try:
-                image = Image.open(image_download[0])
+                # image = Image.open(image_download[0])
+                image = Image.open(BytesIO(response.content))
                 aspect_ratio = image.width / image.height
                 new_width = 360
                 new_height = int(new_width / aspect_ratio)
@@ -650,18 +720,25 @@ def create_thumbs(image_urls: list[str], _unique_id: str) -> None:
             logger.info(f"File already exists: {relative_output_path}")
 
         # TODO to clear current sets globally or for each car?
-        # Добавление относительного пути файла в список
-        image_files_set.add(relative_output_path.as_posix())
-        # Добавление полного пути файла в список
-        current_thumbs_set.add(output_path.as_posix())
-    return None
+        # Добавление относительного пути файла в глобальный список
+        # global set
+        image_filepath_set.add(relative_output_path.as_posix())
+        # Добавление полного пути файла в глобальный список
+        # global set
+        thumb_filepath_set.add(output_path.as_posix())
+
+        # Добавление относительного пути файла для одного объекта
+        # local set
+        image_filepath_for_a_car.append(relative_output_path.as_posix())
+    return image_filepath_for_a_car
 
 
 def cleanup_unused_thumbs() -> None:
     # TODO use global for output_dir and current_thumbs_set?
     logger.info("!!! Cleanup unused thumbs...")
-    all_thumbs = [str(pathlib.Path(thumbs_output_dir, file)) for file in os.listdir(thumbs_output_dir)]
-    unused_thumbs = [thumb for thumb in all_thumbs if thumb not in current_thumbs_set]
+    all_thumbs = [str(pathlib.Path(thumbs_output_dir, file)) for file in
+                  os.listdir(thumbs_output_dir)]
+    unused_thumbs = [thumb for thumb in all_thumbs if thumb not in thumb_filepath_set]
 
     try:
         for thumb in unused_thumbs:
@@ -732,7 +809,7 @@ if __name__ == "__main__":
     data_source = 'stock47_n.xml'
 
     # Process data with input options:
-    if data_source.startswith("http://"):
+    if data_source.startswith("http"):
         xml_root = process_url_to_xml(data_source)
     elif isinstance(data_source, str):
         xml_root = process_file_to_xml(data_source)
@@ -740,23 +817,21 @@ if __name__ == "__main__":
         raise ValueError("Invalid data source format")
 
     # Create a cars list
-    cars = xml_root.find('cars')  # Find the <cars> element (first occurrence)
+    # Find the <cars> element (first occurrence)
+    cars = xml_root.find('cars')
 
     if cars:
         logger.info("Cars found: %s", cars)
+        for i_car in cars:
+            new_car = Car(i_car)
+            car_filepath = new_car.get_unique_id_filepath(*ELEMENTS)
+
+            if car_filepath.exists():
+                update_yaml(new_car, str(car_filepath)) # TODO update_yaml
+            else:
+                create_file(new_car, str(car_filepath))
     else:
         raise ValueError("Cars not found")
-
-    for i_car in cars:
-
-        new_car = Car(i_car)
-        car_filepath = new_car.get_unique_id_filepath(*ELEMENTS)
-
-        if car_filepath.exists():
-            pass
-            # update_yaml(car, car_filepath, unique_id) # TODO update_yaml
-        else:
-            create_file(new_car, str(car_filepath))
 
     work_cars_file: Path = pathlib.Path(__file__).parent / "data.csv"
     # 'public/cars.xml'
